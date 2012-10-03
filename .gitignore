@@ -1,4 +1,6 @@
 deps
 .DS_Store
 priv/flussonic.conf
+.idea/
+Flussonic.iml
 

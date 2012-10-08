@@ -41,6 +41,9 @@ start(_StartType, _StartArgs) ->
   % flu_session:start(),
   
   % sync:go(),
+  inets:start(),
+  inets:start(httpc, [{profile,auth}]),
+  httpc:set_options([{max_sessions,20},{max_keep_alive_length,100}]),
   {ok, Pid} = flussonic_sup:start_link(),
   load_config(),
   write_pid(),
@@ -60,6 +63,7 @@ write_pid() ->
   file:write_file(Path, os:getpid()).
 
 unload_config() ->
+  flu_event:remove_handler(flu_session_log),
   ok.
 
 
@@ -136,7 +140,12 @@ load_config() ->
 	    ?D({"Start RTSP server at port", RTSPPort}),
 	    rtsp:start_server(RTSPPort, rtsp_listener1, flu_rtsp)
 	end,
-	ok.
+
+  case proplists:get_value(sessions_log, Env) of
+    undefined -> ok;
+    SessionLog -> flu_event:add_handler(flu_session_log, SessionLog)
+  end,
+  ok.
 
 
 start_http(Ref, NbAcceptors, Transport, TransOpts, Protocol, ProtoOpts)

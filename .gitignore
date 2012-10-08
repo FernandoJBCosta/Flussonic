@@ -4,3 +4,4 @@ priv/flussonic.conf
 .idea/
 Flussonic.iml
 
+.eunit

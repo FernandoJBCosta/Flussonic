@@ -221,7 +221,7 @@ init([Name,Options1]) ->
   
   Stream2 = set_options(Stream1),
   
-  ?D({starting_stream,Name, Options}),
+  ?DBG("Start stream \"~s\" with url ~p and options: ~p", [Name, Stream2#stream.url, Options]),
   self() ! reconnect_source,
   {ok, Stream2}.
 
@@ -298,8 +298,13 @@ configure_packetizers(#stream{hls = HLS1, hds = HDS1, udp = UDP1, rtmp = RTMP1, 
 configs(#stream{media_info = undefined}) ->
   [];
   
-configs(#stream{last_dts = DTS, media_info = MediaInfo}) ->
-  [F#video_frame{dts = DTS, pts = DTS} || F <- video_frame:config_frames(MediaInfo)].
+configs(#stream{last_dts = DTS, media_info = MediaInfo}) when is_number(DTS) ->
+  [F#video_frame{dts = DTS, pts = DTS} || F <- video_frame:config_frames(MediaInfo)];
+
+configs(#stream{last_dts = undefined, media_info = MediaInfo}) ->
+  video_frame:config_frames(MediaInfo).
+
+
 
 handle_call({update_options, NewOptions}, _From, #stream{name = Name} = Stream) ->
   NewOptions1 = lists:ukeymerge(1, lists:ukeysort(1, NewOptions), [{name,Name}]),
@@ -382,6 +387,7 @@ handle_info(reconnect_source, #stream{source = undefined, name = Name, url = URL
     tshttp -> mpegts:read(URL, []);
     udp -> mpegts:read(URL, []);
     rtsp -> flu_rtsp:read(Name, URL, Options);
+    rtsp2 -> flu_rtsp:read2(Name, URL, Options);
     hls -> hls:read(URL, Options);
     file -> file_source:read(URL, Options);
     rtmp -> flu_rtmp:play_url(Name, URL);
@@ -403,7 +409,7 @@ handle_info(reconnect_source, #stream{source = undefined, name = Name, url = URL
       end, Stream1, Configs),
       {noreply, Stream2};
     _ ->
-      ?D({Stream#stream.name, URL, failed, Stream#stream.retry_count, Stream#stream.retry_limit}),
+      ?ERR("Stream \"~s\" can't open source \"~s\". Retries: ~B/~B", [Name, URL, Count, Stream#stream.retry_limit]),
       Delay = ((Count rem 30) + 1)*1000,
       erlang:send_after(Delay, self(), reconnect_source),
       {noreply, Stream#stream{retry_count = Count+1}}
@@ -466,7 +472,7 @@ handle_info(#video_frame{} = Frame, #stream{retry_count = Count} = Stream) when 
   
 handle_info(#video_frame{} = Frame, #stream{name = Name, dump_frames = Dump, clients = Clients} = Stream) ->
   if Dump ->
-    ?D({frame, Name, Frame#video_frame.codec, Frame#video_frame.flavor, Frame#video_frame.sound, round(Frame#video_frame.dts), round(Frame#video_frame.pts)});
+    ?D({frame, Name, Frame#video_frame.codec, Frame#video_frame.flavor, Frame#video_frame.track_id, round(Frame#video_frame.dts), round(Frame#video_frame.pts)});
     true -> ok
   end,
   Stream1 = save_config(Frame, Stream),

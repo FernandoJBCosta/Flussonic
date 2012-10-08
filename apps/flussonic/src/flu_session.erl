@@ -18,7 +18,7 @@
 -export([verify/3]).
 
 
--export([backend_request/3]).
+-export([backend_request/3, timeout/0]).
 
 % -record(session, {
 %   id,
@@ -52,45 +52,53 @@ merge(List1, List2) ->
 
 verify(URL, Identity, Options) ->
 
-  Session = case find_session(Identity) of
+  {Session, ErrorMessage} = case find_session(Identity) of
     undefined ->
       case backend_request(URL, Identity, Options) of
-        {error,  _, Opts1} -> new_session(Identity, Opts1 ++ Options);
-        {ok, Name1, Opts1} -> new_session(Identity, merge([{name,Name1}], Opts1 ++ Options))
+        {error,  {_Code,ErrMsg}, Opts1} -> {new_session(Identity, Opts1 ++ Options), ErrMsg};
+        {ok, Name1, Opts1} -> {new_session(Identity, merge([{name,Name1}], Opts1 ++ Options)), "cached_positive"}
       end;
-    R -> R
+    R -> {R, "cached_negative"}
   end,
   case update_session(Session) of
-    denied -> {error, 403, "denied"};
+    denied -> {error, 403, ErrorMessage};
     granted -> {ok, url(Session)}
   end.
 
 
-
+timeout() ->
+  3000.
 
 backend_request(URL, Identity, Options) ->
-  Query = string:join([io_lib:format("~s=~s&", [K,V]) || {K,V} <- Identity ++ Options, is_binary(V) orelse is_list(V)], "&"),
+  Query = [io_lib:format("~s=~s&", [K,V]) || {K,V} <- Identity ++ Options, is_binary(V) orelse is_list(V)],
   RequestURL = lists:flatten([URL, "?", Query]),
-  Name = proplists:get_value(name, Identity),
-  case http_stream:request_body(RequestURL, [{noredirect, true}, {keepalive, false}]) of
-    {ok, {_Socket, Code, Headers, _Body}} ->
-      Opts0_ = [{expire,to_i(proplists:get_value(<<"X-AuthDuration">>, Headers))},
-        {user_id,to_i(proplists:get_value(<<"X-UserId">>, Headers))}],
+  case httpc:request(get, {RequestURL, []}, [{connect_timeout, flu_session:timeout()},{timeout, flu_session:timeout()},{autoredirect,false}],
+    [], auth) of
+    {ok, {{_,Code,_}, Headers, _Body}} ->
+      ?DBG("Backend auth request \"~s\": ~B code", [RequestURL, Code]),
+      Opts0_ = [{expire,to_i(proplists:get_value("x-authduration", Headers))},
+        {user_id,to_i(proplists:get_value("x-userid", Headers))}],
       Opts0 = merge([{K,V} || {K,V} <- Opts0_, V =/= undefined], Options),
+      Name = to_b(proplists:get_value("x-name", Headers, proplists:get_value(name, Identity))),
       case Code of
-        200 -> {ok,    Name,                                             merge([{access, granted}],Opts0)};
-        302 -> {ok,    proplists:get_value(<<"X-Name">>, Headers, Name), merge([{access, granted}],Opts0)};
-        403 -> {error, 403,                                              merge([{access, denied}], Opts0)};
-        _ ->   {error, 403,                                              merge([{access, denied}], Opts0)}
+        200 -> {ok,    Name, merge([{access, granted}],Opts0)};
+        302 -> {ok,    Name, merge([{access, granted}],Opts0)};
+        403 -> {error, {403, "backend_denied"},  merge([{access, denied}], Opts0)};
+        _ ->   {error, {403, io_lib:format("backend_code: ~B", [Code])},  merge([{access, denied}], Opts0)}
       end;
-    {error, _} ->
-      {error, 404, merge([{access, denied}], Options)}
+    {error, _Error} ->
+      ?DBG("Backend auth request \"~s\": failed: ~p", [RequestURL, _Error]),
+      {error, {404, "backend_http_error"}, merge([{access, denied}], Options)}
   end.
 
 
 to_i(undefined) -> undefined;
+to_i(List) when is_list(List) -> list_to_integer(List);
 to_i(Bin) when is_binary(Bin) -> list_to_integer(binary_to_list(Bin)).
 
+to_b(undefined) -> undefined;
+to_b(List) when is_list(List) -> list_to_binary(List);
+to_b(Bin) when is_binary(Bin) -> Bin.
 
 clients() ->
   Now = flu:now_ms(),

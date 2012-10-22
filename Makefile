@@ -1,25 +1,33 @@
 # include version.mk
-VERSION := $(shell grep vsn apps/flussonic/src/flussonic.app.src | ruby -e 'puts STDIN.read[/\"([0-9\.]+)\"/, 1]')
+VERSION := $(shell ./contrib/version.erl)
 NODENAME ?= flussonic
-DESTDIR ?= /opt/flussonic
+REBAR := $(shell which rebar || echo ./rebar)
 
 all: app
 
 
-install: all
-	mkdir -p $(DESTDIR)
-	cp -r Emakefile Makefile apps contrib deps priv rebar wwwroot $(DESTDIR)
-	
+install:
+	mkdir -p $(DESTDIR)/usr/share/flussonic/deps $(DESTDIR)/etc/init.d/ $(DESTDIR)/etc/default
+	cp -r apps deps wwwroot $(DESTDIR)/usr/share/flussonic
+	cp priv/flussonic $(DESTDIR)/etc/init.d/
+	echo "FLUDIR=/usr/share/flussonic" >> $(DESTDIR)/etc/default/flussonic
+	mkdir -p $(DESTDIR)/usr/share/doc/flussonic/ $(DESTDIR)/etc/flussonic/
+	cp COPYING $(DESTDIR)/usr/share/doc/flussonic/copyright
+	cp priv/sample/flussonic.conf $(DESTDIR)/etc/flussonic/flussonic.conf
+
+
+compile:
+	ERL_LIBS=apps:deps erl -make
 
 
 app: deps/cowboy
-	@ERL_LIBS=apps:deps erl -make
+	@$(REBAR) compile
 
 deps/cowboy:
-	@./rebar get-deps
+	@$(REBAR) get-deps
 
 clean:
-	@./rebar clean
+	@$(REBAR) clean
 	rm -f erl_crash.dump
 
 run:
@@ -33,6 +41,11 @@ vagrant:
 	vagrant destroy -f
 	vagrant up
 	vagrant ssh -c "sudo -s /etc/init.d/flussonic start"
+
+
+# check_public:
+# 	vagrant destroy -f
+	
 
 start:
 	mkdir -p log/pipe
@@ -51,11 +64,30 @@ stop:
 
 dist-clean: clean
 
-opensource:
+tgz:
 	rm -rf flussonic-$(VERSION)
 	git archive --prefix=flussonic-$(VERSION)/ master | tar x
-	cd flussonic-$(VERSION) && ./rebar get-deps && ./rebar compile && find . -name *.beam -delete && find . -name *.so -delete
+	mkdir -p flussonic-$(VERSION)/deps
+	[ -d deps ] && for d in deps/* ; do git clone $$d flussonic-$(VERSION)/deps/`basename $$d`; done || true
+	cd flussonic-$(VERSION) && ./rebar get-deps
+	cp -f contrib/Makefile.debian flussonic-$(VERSION)/Makefile
+	perl -pi -e s,vsn_subst,$(VERSION),g flussonic-$(VERSION)/Makefile
+	rm -f flussonic-$(VERSION)/deps/mimetypes/src/mimetypes_parse.erl
+	find flussonic-$(VERSION) -name *.beam -delete
+	find flussonic-$(VERSION) -name *.so -delete
+	find flussonic-$(VERSION) -name *.o -delete
+	find flussonic-$(VERSION) -name *.app.src -exec perl -pi -e s,git,'"v1.0"',g {} \;
+	find flussonic-$(VERSION) -name .gitignore -delete
+	cat rebar.config |grep -v meck > flussonic-$(VERSION)/rebar.config
+	rm -rf flussonic-$(VERSION)/deps/meck
+	rm -rf flussonic-$(VERSION)/deps/cowboy/test
+	rm -rf flussonic-$(VERSION)/deps/cowboy/examples
+	rm -rf flussonic-$(VERSION)/deps/*/.git
+	rm -rf flussonic-$(VERSION)/apps/rtsp/priv
+	rm -rf flussonic-$(VERSION)/deps/lager/rebar
 	rm -f flussonic-$(VERSION)/apps/mpegts/contrib/build_table.rb
+	rm -f flussonic-$(VERSION)/apps/flussonic/src/reloader.erl
+	rm -f flussonic-$(VERSION)/apps/flussonic/mibs-unused/ERLYVIDEO-MIB.mib
 	tar zcf flussonic-$(VERSION).tgz flussonic-$(VERSION)
 	rm -rf flussonic-$(VERSION)
 
@@ -63,6 +95,8 @@ package:
 	rm -rf tmproot
 	mkdir -p tmproot/opt/flussonic
 	git archive master | (cd tmproot/opt/flussonic; tar x)
+	mkdir -p tmproot/opt/flussonic/deps
+	[ -d deps ] && for d in deps/* ; do git clone $$d tmproot/opt/flussonic/deps/`basename $$d`; done || true
 	(cd tmproot/opt/flussonic/ && ./rebar get-deps && ./rebar compile)
 	rm -rf tmproot/opt/flussonic/deps/proper*
 	rm -rf tmproot/opt/flussonic/apps/mpegts/contrib/build_table.rb tmproot/opt/flussonic/apps/rtsp/priv/* tmproot/opt/flussonic/deps/*/test
@@ -77,7 +111,7 @@ package:
 	cd tmproot && \
 	fpm -s dir -t deb -n flussonic -v $(VERSION) --category net \
 	--config-files /etc/flussonic/flussonic.conf --config-files /etc/flussonic/streams.conf --config-files '/etc/flussonic/*.conf' \
-	-d 'esl-erlang (>= 15) | esl-erlang-nox (>= 15) | erlang-base-hipe (>= 1:15)' --post-install opt/flussonic/priv/postinst -m "Max Lapshin <max@maxidoors.ru>" -a amd64 etc/init.d/flussonic etc/flussonic opt 
+	-d 'esl-erlang (>= 15) | esl-erlang-nox (>= 15) | erlang-nox (>= 1:15)' -m "Max Lapshin <max@maxidoors.ru>" -a amd64 etc/init.d/flussonic etc/flussonic opt 
 	mv tmproot/*.deb .
 	rm -rf tmproot
 
@@ -92,5 +126,5 @@ upload:
 	ssh erlyhub@erlyvideo.org "cd /apps/erlyvideo/debian ; ./update ; cd public/binary ; ln -sf flussonic-$(VERSION).tgz flussonic-latest.tgz "
 	@#echo "Erlyvideo version ${VERSION} uploaded to debian repo http://debian.erlyvideo.org/ ." | mail -r "Erlybuild <build@erlyvideo.org>" -s "Erlyvideo version ${VERSION}" -v erlyvideo-dev@googlegroups.com
 
-new_version: opensource package escriptize upload
+new_version: tgz package escriptize upload
 

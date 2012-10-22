@@ -2,16 +2,45 @@
 # vi: set ft=ruby :
 
 Vagrant::Config.run do |config|
+
+
+  config.vm.define :precise64_deploy do |conf|
+    conf.vm.box = "precise64"
+    conf.vm.box_url = "http://files.vagrantup.com/precise64.box"
+    conf.vm.provision :shell, :path => "manifests/precise64_deply.sh"
+
+    conf.vm.forward_port 8080, 9080
+    conf.vm.forward_port 6081, 9081
+    conf.vm.forward_port 6082, 9082
+  end
+
+  config.vm.define :precise64 do |conf|
+    conf.vm.box = "precise64"
+    conf.vm.box_url = "http://files.vagrantup.com/precise64.box"
+    conf.vm.provision :shell, :path => "manifests/precise64.sh"
+  end
+
+  config.vm.define :squeeze64 do |conf|
+    conf.vm.box = "squeeze64"
+    conf.vm.box_url = "http://puppetlabs.s3.amazonaws.com/pub/squeeze64.box"
+    conf.vm.provision :shell, :path => "manifests/squeeze64.sh"
+    conf.vm.forward_port 8080, 9180
+  end
+
+  config.vm.define :centos6 do |conf|
+    conf.vm.box = "centos6"
+    conf.vm.box_url = "https://vagrant-centos-6.s3.amazonaws.com/centos-6.box"
+    conf.vm.provision :shell, :path => "manifests/centos6.sh"
+  end
+
   # All Vagrant configuration is done here. The most common configuration
   # options are documented and commented below. For a complete reference,
   # please see the online documentation at vagrantup.com.
 
   # Every Vagrant virtual environment requires a box to build off of.
-  config.vm.box = "precise64"
 
   # The url from where the 'config.vm.box' box will be fetched if it
   # doesn't already exist on the user's system.
-  config.vm.box_url = "http://files.vagrantup.com/precise64.box"
 
   # Boot with a GUI so you can see the screen. (Default is headless)
   # config.vm.boot_mode = :gui
@@ -29,10 +58,7 @@ Vagrant::Config.run do |config|
 
   # Forward a port from the guest to the host, which allows for outside
   # computers to access the VM, whereas host only networking does not.
-  config.vm.forward_port 80, 9070
-  config.vm.forward_port 8080, 9080
-  config.vm.forward_port 6081, 9081
-  config.vm.forward_port 6082, 9082
+  # config.vm.forward_port 80, 9070
   
   # Share an additional folder to the guest VM. The first argument is
   # an identifier, the second is the path on the guest to mount the
@@ -62,7 +88,6 @@ Vagrant::Config.run do |config|
   #   puppet.manifest_file  = "precise64.pp"
   # end
 
-  config.vm.provision :shell, :path => "manifests/precise64.sh"
 
   # Enable provisioning with chef solo, specifying a cookbooks path, roles
   # path, and data_bags path (all relative to this Vagrantfile), and adding 

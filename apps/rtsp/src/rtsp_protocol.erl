@@ -13,12 +13,16 @@
 
 -export([to_hex/1, digest_auth/5]).
 
+-export([collect_headers/1, collect_body/2, collect_headers_and_body/1]).
+
 -define(RTCP_SR, 200).
 -define(RTCP_RR, 201).
 -define(RTCP_SD, 202).
 -define(YEARS_70, 2208988800).  % RTP bases its timestamp on NTP. NTP counts from 1900. Shift it to 1970. This constant is not precise.
 -define(YEARS_100, 3155673600).  % RTP bases its timestamp on NTP. NTP counts from 1900. Shift it to 1970. This constant is not precise.
 
+
+-define(KEEPALIVE, 3000).
 
 start_link(Options) ->
   gen_server:start_link(?MODULE, [Options], []).
@@ -126,8 +130,8 @@ handle_info(connect, #rtsp{socket = undefined, url = URL} = RTSP) when URL =/= u
   % Auth = fun empty_auth/2, 
   % AuthType = undefined,
   CleanURL = re:replace(URL, "^rtsp://(.+@)?(.*)$", "rtsp://\\2", [{return, list}]),
-  erlang:send_after(5000, self(), send_rr),
-  erlang:send_after(5000, self(), keepalive),
+  erlang:send_after(?KEEPALIVE, self(), send_rr),
+  erlang:send_after(?KEEPALIVE, self(), keepalive),
   {noreply, RTSP#rtsp{url = CleanURL, socket = Socket, auth_info = AuthInfo, auth = Auth, auth_type = AuthType}};
 
 handle_info({request, Ref, Request, RequestHeaders}, #rtsp{socket = Socket, consumer = Consumer} = RTSP) ->
@@ -137,9 +141,9 @@ handle_info({request, Ref, Request, RequestHeaders}, #rtsp{socket = Socket, cons
   {noreply, RTSP2};
 
 handle_info(keepalive, #rtsp{socket = Socket, dump = Dump} = RTSP) ->
-  {RTSP2, _, _, _} = call_with_authenticate(RTSP#rtsp{dump = false}, 'GET_PARAMETER', [{session,false}]),
+  {RTSP2, _, _, _} = call_with_authenticate(RTSP#rtsp{dump = false}, 'GET_PARAMETER', []),
   inet:setopts(Socket, [{active,once},{packet,raw}]),
-  erlang:send_after(5000, self(), keepalive),
+  erlang:send_after(?KEEPALIVE, self(), keepalive),
   {noreply, RTSP2#rtsp{dump = Dump}};
 
 
@@ -160,6 +164,18 @@ handle_info({tcp, Socket, <<$$, _/binary>> = Bin}, #rtsp{} = RTSP) ->
   {ok, RTSP1, <<>>} = read_rtp_packets(Bin, RTSP),
   inet:setopts(Socket, [{active,once}]),
   {noreply, RTSP1};
+
+handle_info({tcp, Socket, Bin}, #rtsp{} = RTSP) ->
+  ?DBG("read strange RTSP/RTP data: ~240p", [Bin]),
+  RTSP1 = case binary:split(Bin, <<$$>>) of
+    [Bin] -> RTSP;
+    [_Junk, Rest] ->
+      {ok, RTSP_, <<>>} = read_rtp_packets(<<$$, Rest/binary>>, RTSP),
+      RTSP_
+  end,
+  inet:setopts(Socket, [{active,once}]),
+  {noreply, RTSP1};
+
 
 handle_info({tcp_closed, _Socket}, #rtsp{} = RTSP) ->
   {stop, normal, RTSP};
@@ -204,12 +220,11 @@ read_rtp_packets(<<$$, ChannelId, Length:16, RTCP:Length/binary, Rest/binary>>, 
   read_rtp_packets(Rest, RTSP1);
 
 read_rtp_packets(<<$$, ChannelId, Length:16, RTP:Length/binary, Rest/binary>>, #rtsp{consumer = Consumer} = RTSP) ->
-  <<_:16, Sequence:16, _/binary>> = RTP,
+  % <<_:16, Sequence:16, _/binary>> = RTP,
   ChannelId_ = ChannelId div 2,
-  Chan1 = #rtp{decoder = Decoder1} = (element(#rtsp.chan1 + ChannelId_, RTSP)),
-  {ok, Decoder2, Frames} = rtp_decoder:decode(RTP, Decoder1),
+  Chan1 = element(#rtsp.chan1 + ChannelId_, RTSP),
+  {ok, Chan2, Frames} = decode_rtp(RTP, Chan1),
   [Consumer ! Frame || Frame <- Frames],
-  Chan2 = Chan1#rtp{seq = Sequence, decoder = Decoder2},
   RTSP1 = setelement(#rtsp.chan1 + ChannelId_, RTSP, Chan2),
   read_rtp_packets(Rest, RTSP1);
 
@@ -225,7 +240,19 @@ read_rtp_packets(<<"RTSP", _/binary>> = Bin, RTSP) ->
   {ok, RTSP, Bin};
 
 read_rtp_packets(<<>>, RTSP) ->
-  {ok, RTSP, <<>>}.
+  {ok, RTSP, <<>>};
+
+read_rtp_packets(Bin, RTSP) ->
+  case binary:split(Bin, <<$$>>) of
+    [Bin] -> ?D({bad_data, Bin}), {ok, RTSP, <<>>};
+    [_Skip, Rest] -> ?D(resync), read_rtp_packets(<<$$, Rest/binary>>, RTSP)
+  end.
+
+
+decode_rtp(RTP, #rtp{decoder = Decoder1} = Chan1) ->
+  {ok, Decoder2, Frames} = rtp_decoder:decode(RTP, Decoder1),
+  {ok, Chan1#rtp{decoder = Decoder2}, Frames}.
+
 
 
 
@@ -261,30 +288,46 @@ read_response_code(#rtsp{socket = Socket, url = URL} = RTSP) ->
 
 recv(#rtsp{socket = Socket, dump = NeedToDump, url = URL} = RTSP) ->
   {Code, Dump1, RTSP1} = read_response_code(RTSP),
-  inet:setopts(Socket, [{packet, httph_bin}]),
-  {Headers, Dump2} = collect_headers(Socket, [], []),
-  inet:setopts(Socket, [{packet, raw}]),
+  {Headers, Dump2} = collect_headers(Socket),
   if NeedToDump ->
   io:format(">>>>>> RTSP IN (~p:~p) >>>>>~n~s~s~n", [?MODULE, ?LINE, Dump1, Dump2]);
   true -> ok end,
   is_list(Headers) orelse throw({stop, {error, {headers, Headers, URL}}, RTSP1}),
-  Body = case proplists:get_value('Content-Length', Headers) of
-    undefined -> undefined;
-    ContentLength_ ->
-      ContentLength = list_to_integer(binary_to_list(ContentLength_)),
-      case gen_tcp:recv(Socket, ContentLength, 10000) of
-        {ok, Bin} ->
-          if NeedToDump -> io:format("~s~n", [Bin]); true -> ok end,
-          Bin;
-        {error, Err} -> throw({stop, {error, {read_body, ContentLength, Err, URL}}, RTSP1})
-      end
+  Body = try collect_body(Socket, Headers)
+  catch
+    throw:{error, Error} -> throw({stop, {error, Error, URL}, RTSP1})
   end,
+  if NeedToDump andalso is_binary(Body) -> io:format("~s~n", [Body]); true -> ok end,
+
   RTSP2 = case proplists:get_value(<<"Session">>, Headers) of
     undefined -> RTSP1;
     SessToken -> RTSP1#rtsp{session = hd(binary:split(SessToken, <<";">>))}
   end,
   {RTSP2, Code, Headers, Body}.
 
+
+collect_headers_and_body(Socket) ->
+  {Headers, Dump} = collect_headers(Socket),
+  Body = collect_body(Socket, Headers),
+  {Headers, Body, Dump}.
+
+
+collect_body(Socket, Headers) ->
+  inet:setopts(Socket, [{packet, raw}]),
+  Body = case proplists:get_value('Content-Length', Headers) of
+    undefined -> undefined;
+    ContentLength_ ->
+      ContentLength = list_to_integer(binary_to_list(ContentLength_)),
+      case gen_tcp:recv(Socket, ContentLength, 10000) of
+        {ok, Bin} -> Bin;
+        {error, Err} -> throw({error, {read_body, ContentLength, Err}})
+      end
+  end,
+  Body.
+
+collect_headers(Socket) ->
+  inet:setopts(Socket, [{packet, httph_bin}]),
+  collect_headers(Socket, [], []).
 
 collect_headers(Socket, Acc, Dump) ->
   case gen_tcp:recv(Socket, 0, 10000) of

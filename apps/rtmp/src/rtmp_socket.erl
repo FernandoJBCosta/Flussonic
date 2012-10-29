@@ -47,6 +47,7 @@
 -author('Max Lapshin <max@maxidoors.ru>').
 -include("../include/rtmp.hrl").
 -include("rtmp_private.hrl").
+-include_lib("eunit/include/eunit.hrl").
 -version(1.1).
 
 -export([accept/1, connect/1, connect/2, start_link/1, getopts/2, setopts/2, getstat/2, getstat/1, send/2, get_socket/1]).
@@ -56,6 +57,8 @@
 -export([start_socket/2, start_server/3, start_server/4, stop_server/1, set_socket/2]).
 -export([close/1]).
   
+
+-export([set_options/2]).
 
 
 %% gen_fsm callbacks
@@ -73,13 +76,13 @@
 %% @end
 -spec(start_server(Port::integer(), Name::atom(), Callback::atom()) -> {ok, Pid::pid()}).
 start_server(Port, Name, Callback) ->
-  rtmp_sup:start_rtmp_listener(Port, Name, Callback, []).
+  start_server(Port, Name, Callback, []).
 
 start_server(Port, Name, Callback, Args) ->
-  rtmp_sup:start_rtmp_listener(Port, Name, Callback, Args).
+  ranch:start_listener(Name, 10, ranch_tcp, [{port, Port}], rtmp_listener, [Callback, Args]).  
 
 stop_server(Name) ->
-  rtmp_sup:stop_rtmp_listener(Name).
+  ranch:stop_listener(Name).
 
 %% @spec (Socket::port()) -> {ok, RTMP::pid()}
 %% @doc Accepts client connection on socket Socket, starts RTMP decoder, passes socket to it
